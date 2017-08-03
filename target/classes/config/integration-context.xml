@@ -1,0 +1,81 @@
+<beans xmlns="http://www.springframework.org/schema/beans"
+	xmlns:si-xml="http://www.springframework.org/schema/integration/xml"
+	xmlns:si="http://www.springframework.org/schema/integration"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xmlns:util="http://www.springframework.org/schema/util"
+	xmlns:si-file="http://www.springframework.org/schema/integration/file"
+	xmlns:context="http://www.springframework.org/schema/context"
+	xsi:schemaLocation="http://www.springframework.org/schema/beans
+			http://www.springframework.org/schema/beans/spring-beans.xsd
+			http://www.springframework.org/schema/integration
+			http://www.springframework.org/schema/integration/spring-integration.xsd
+			http://www.springframework.org/schema/integration/file 
+			http://www.springframework.org/schema/integration/file/spring-integration-file.xsd
+			http://www.springframework.org/schema/integration/xml
+			http://www.springframework.org/schema/integration/xml/spring-integration-xml.xsd
+			http://www.springframework.org/schema/util
+			http://www.springframework.org/schema/util/spring-util.xsd
+			http://www.springframework.org/schema/context 
+			http://www.springframework.org/schema/context/spring-context.xsd">
+
+	<context:annotation-config />
+	<context:property-placeholder />
+
+	<!-- This adapter will poll the specified directory for any new input file 
+		and once found will forward it to fileInChannel -->
+	<si-file:inbound-channel-adapter id="inboundChannelAdaptor" channel="inboundChannel" directory="file:${spring.icscards.origin.directory}" filename-pattern="*.xml" ignore-hidden="true" prevent-duplicates="true">
+		<si:poller id="inboundPoller" fixed-delay="5000">
+			<si:transactional transaction-manager="transactionManager" synchronization-factory="syncFactory"/>
+		</si:poller>
+	</si-file:inbound-channel-adapter>
+	
+	<si:channel id="inboundChannel" />
+	
+	<bean id="transactionManager" class="org.springframework.integration.transaction.PseudoTransactionManager" />
+	
+	<!-- Transaction factory for moving the files to directories based on the success and failure of the process -->
+	<si:transaction-synchronization-factory id="syncFactory">
+		<si:after-commit  expression="@transactionFilter.transactionAfterCommit(payload)" channel="infoLogger" />
+		<si:after-rollback expression="@transactionFilter.transactionRollback(payload)" channel="errorLogger" />
+	</si:transaction-synchronization-factory>	
+		
+	<si:logging-channel-adapter id="infoLogger" level="INFO" />
+	<si:logging-channel-adapter id="errorLogger" level="ERROR" />
+	
+	<!-- Header enricher for adding or modifying the headers of the message -->
+	<si:header-enricher input-channel="inboundChannel" output-channel="enricherOutboundChannel">
+		<si:header name="input-file" ref="headerEnricher" method="updateHeaderWithInputFileName" />
+		<si:header name="output-file" ref="headerEnricher" method="updateHeaderWithOutputFileName" />
+	</si:header-enricher>
+	
+	<si:channel id="enricherOutboundChannel" />
+
+	<!-- Custom header class for setting a new attribute in the header -->
+	<bean id="headerEnricher" class="nl.icscards.springintegration.enricher.InputHeaderEnricher" />
+	
+	<si:transformer input-channel="enricherOutboundChannel" output-channel="transformOutChannel" expression="@customTransformer.transform(payload)"/>
+
+	<si:channel id="transformOutChannel" />
+	
+	<si:filter id="fileInputFilter" input-channel="transformOutChannel" output-channel="filterOutboundChannel">
+		<bean class="nl.icscards.springintegration.filter.InputFileFilter" />
+	</si:filter>
+	
+	<!-- This endpoint will receive the xml input and it is in this component 
+		you will do your business logic processing and forward it to o/p channel -->
+	<si:service-activator input-channel="filterOutboundChannel" output-channel="serviceOutboundChannel">
+		<bean class="nl.icscards.springintegration.activator.InputFileService" />
+	</si:service-activator>
+		
+	<si:channel id="serviceOutboundChannel" />
+
+	<!-- This inbuild adapter will simply receive the processed xml and output 
+		as a file in the specified directory -->
+	<si-file:outbound-channel-adapter id="outputFile"
+		directory="file:${spring.icscards.destination.directory}" channel="serviceOutboundChannel"
+		filename-generator="fileNameGenerator">
+	</si-file:outbound-channel-adapter>
+
+	<!-- Custom file generator for changing the name of the output file. -->
+	<bean id="fileNameGenerator" class="nl.icscards.springintegration.generator.FileNameGenerator" />
+</beans>
